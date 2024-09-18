@@ -7,7 +7,7 @@ import (
 )
 
 func ReadTag() (string, error) {
-	currentTag, err := shell.Exec("git", "describe", "--tags").Read()
+	currentTag, err := shell.Exec("git", "describe", "--tags").ReadOutput()
 	if err != nil {
 		return currentTag, err
 	}
