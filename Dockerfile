@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.23-bookworm AS builder
 LABEL maintainer="nekohasekai <contact-git@sekai.icu>"
 COPY . /go/src/github.com/sagernet/sing-box
 WORKDIR /go/src/github.com/sagernet/sing-box
@@ -9,7 +9,8 @@ ENV CGO_ENABLED=0
 ENV GOOS=$TARGETOS
 ENV GOARCH=$TARGETARCH
 RUN set -ex \
-    && apk add git build-base \
+    && apt update \
+    && apt install -y git build-essential \
     && export COMMIT=$(git rev-parse --short HEAD) \
     && export VERSION=$(go run ./cmd/internal/read_tag) \
     && go build -v -trimpath -tags \
@@ -17,11 +18,11 @@ RUN set -ex \
         -o /go/bin/sing-box \
         -ldflags "-X \"github.com/sagernet/sing-box/constant.Version=$VERSION\" -s -w -buildid=" \
         ./cmd/sing-box
-FROM --platform=$TARGETPLATFORM alpine AS dist
+FROM --platform=$TARGETPLATFORM debian:stable AS dist
 LABEL maintainer="nekohasekai <contact-git@sekai.icu>"
 RUN set -ex \
-    && apk upgrade \
-    && apk add bash tzdata ca-certificates nftables \
-    && rm -rf /var/cache/apk/*
+    && apt update \
+    && apt install -y ca-certificates nftables \
+    && apt clean
 COPY --from=builder /go/bin/sing-box /usr/local/bin/sing-box
 ENTRYPOINT ["sing-box"]

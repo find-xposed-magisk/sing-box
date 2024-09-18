@@ -15,7 +15,4 @@ func main() {
 	} else {
 		_, err = os.Stdout.WriteString(currentTag + "\n")
 	}
-	if err != nil {
-		log.Error(err)
-	}
 }
