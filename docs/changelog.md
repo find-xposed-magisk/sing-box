@@ -4,7 +4,17 @@ icon: material/alert-decagram
 
 #### 1.11.0-alpha.19
 
+* Upgrade WireGuard outbound to endpoint **1**
 * Fixes and improvements
+
+**1**:
+
+The new endpoint protocol combines inbound and outbound, the new WireGuard endpoint accepts incoming connections on top of outbound. 
+
+This is all compatible with exist features, and the old outbound will be preserved until sing-box 1.13.0.
+
+See [Endpoint](/configuration/endpoint/), [WireGuard Endpoint](/configuration/endpoint/wireguard/)
+and [Migrate WireGuard outbound fields to route options](/migration/#migrate-wireguard-outbound-to-endpoint).
 
 ### 1.10.2
 
