@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -277,12 +278,13 @@ func (s *StartedService) SubscribeLog(empty *emptypb.Empty, server grpc.ServerSt
 	for element := s.logLines.Front(); element != nil; element = element.Next() {
 		savedLines = append(savedLines, element.Value)
 	}
-	s.logAccess.Unlock()
 	subscription, done, err := s.logObserver.Subscribe()
+	s.logAccess.Unlock()
 	if err != nil {
 		return err
 	}
 	defer s.logObserver.UnSubscribe(subscription)
+	s.WriteMessage(log.LevelDebug, "SubscribeLog: sending "+strconv.Itoa(len(savedLines))+" saved lines")
 	err = server.Send(&Log{
 		Messages: common.Map(savedLines, func(it *log.Entry) *Log_Message {
 			return &Log_Message{
@@ -816,13 +818,13 @@ func (s *StartedService) mustEmbedUnimplementedStartedServiceServer() {
 
 func (s *StartedService) WriteMessage(level log.Level, message string) {
 	item := &log.Entry{Level: level, Message: message}
-	s.logSubscriber.Emit(item)
 	s.logAccess.Lock()
 	s.logLines.PushBack(item)
 	if s.logLines.Len() > s.logMaxLines {
 		s.logLines.Remove(s.logLines.Front())
 	}
 	s.logAccess.Unlock()
+	s.logSubscriber.Emit(item)
 	if s.debug {
 		s.handler.WriteDebugMessage(message)
 	}
