@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"io"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -12,26 +14,52 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Old implementation using varbin reflection-based serialization
-
 func oldWriteString(writer varbin.Writer, value string) error {
-	//nolint:staticcheck
-	return varbin.Write(writer, binary.BigEndian, value)
+	_, err := varbin.WriteUvarint(writer, uint64(len(value)))
+	if err != nil {
+		return err
+	}
+	if value == "" {
+		return nil
+	}
+	_, err = writer.Write([]byte(value))
+	return err
 }
 
 func oldWriteItem(writer varbin.Writer, item Item) error {
-	//nolint:staticcheck
-	return varbin.Write(writer, binary.BigEndian, item)
+	err := writer.WriteByte(byte(item.Type))
+	if err != nil {
+		return err
+	}
+	return oldWriteString(writer, item.Value)
 }
 
 func oldReadString(reader varbin.Reader) (string, error) {
-	//nolint:staticcheck
-	return varbin.ReadValue[string](reader, binary.BigEndian)
+	length, err := binary.ReadUvarint(reader)
+	if err != nil {
+		return "", err
+	}
+	if length == 0 {
+		return "", nil
+	}
+	buf := make([]byte, length)
+	_, err = io.ReadFull(reader, buf)
+	if err != nil {
+		return "", err
+	}
+	return string(buf), nil
 }
 
 func oldReadItem(reader varbin.Reader) (Item, error) {
-	//nolint:staticcheck
-	return varbin.ReadValue[Item](reader, binary.BigEndian)
+	typeByte, err := reader.ReadByte()
+	if err != nil {
+		return Item{}, err
+	}
+	value, err := oldReadString(reader)
+	if err != nil {
+		return Item{}, err
+	}
+	return Item{Type: ItemType(typeByte), Value: value}, nil
 }
 
 func TestStringCompat(t *testing.T) {
@@ -44,10 +72,12 @@ func TestStringCompat(t *testing.T) {
 		{"empty", ""},
 		{"single_char", "a"},
 		{"ascii", "example.com"},
+		{"mixed_case", "Example.COM"},
 		{"utf8", "测试域名.中国"},
 		{"special_chars", "\x00\xff\n\t"},
 		{"127_bytes", strings.Repeat("x", 127)},
 		{"128_bytes", strings.Repeat("x", 128)},
+		{"255_bytes", strings.Repeat("x", 255)},
 		{"16383_bytes", strings.Repeat("x", 16383)},
 		{"16384_bytes", strings.Repeat("x", 16384)},
 	}
@@ -98,12 +128,15 @@ func TestItemCompat(t *testing.T) {
 	}{
 		{"domain_empty", Item{Type: RuleTypeDomain, Value: ""}},
 		{"domain_normal", Item{Type: RuleTypeDomain, Value: "example.com"}},
+		{"domain_mixed_case", Item{Type: RuleTypeDomain, Value: "Example.COM"}},
 		{"domain_suffix", Item{Type: RuleTypeDomainSuffix, Value: ".example.com"}},
 		{"domain_keyword", Item{Type: RuleTypeDomainKeyword, Value: "google"}},
 		{"domain_regex", Item{Type: RuleTypeDomainRegex, Value: `^.*\.example\.com$`}},
 		{"utf8_domain", Item{Type: RuleTypeDomain, Value: "测试.com"}},
+		{"special_chars_value", Item{Type: RuleTypeDomain, Value: "\x00\x7f\n\t"}},
 		{"long_domain", Item{Type: RuleTypeDomainSuffix, Value: strings.Repeat("a", 200) + ".com"}},
 		{"128_bytes_value", Item{Type: RuleTypeDomain, Value: strings.Repeat("x", 128)}},
+		{"256_bytes_value", Item{Type: RuleTypeDomain, Value: strings.Repeat("y", 256)}},
 	}
 
 	for _, tc := range cases {
@@ -188,6 +221,10 @@ func TestGeositeWriteReadCompat(t *testing.T) {
 			"large_items",
 			generateLargeItems(1000),
 		},
+		{
+			"many_codes",
+			generateManyCodes(64, 8),
+		},
 	}
 
 	for _, tc := range cases {
@@ -231,4 +268,20 @@ func generateLargeItems(count int) map[string][]Item {
 		}
 	}
 	return map[string][]Item{"large": items}
+}
+
+func generateManyCodes(codeCount, itemsPerCode int) map[string][]Item {
+	result := make(map[string][]Item, codeCount)
+	for i := 0; i < codeCount; i++ {
+		code := "code" + strconv.Itoa(i)
+		items := make([]Item, itemsPerCode)
+		for j := 0; j < itemsPerCode; j++ {
+			items[j] = Item{
+				Type:  ItemType((i + j) % 4),
+				Value: strings.Repeat("y", (i+j)%64) + ".example",
+			}
+		}
+		result[code] = items
+	}
+	return result
 }

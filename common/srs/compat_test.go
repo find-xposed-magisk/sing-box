@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"io"
 	"net/netip"
 	"strings"
 	"testing"
@@ -16,43 +17,120 @@ import (
 	"go4.org/netipx"
 )
 
-// Old implementations using varbin reflection-based serialization
-
 func oldWriteStringSlice(writer varbin.Writer, value []string) error {
-	//nolint:staticcheck
-	return varbin.Write(writer, binary.BigEndian, value)
+	_, err := varbin.WriteUvarint(writer, uint64(len(value)))
+	if err != nil {
+		return err
+	}
+	for _, item := range value {
+		_, err = varbin.WriteUvarint(writer, uint64(len(item)))
+		if err != nil {
+			return err
+		}
+		if item == "" {
+			continue
+		}
+		_, err = writer.Write([]byte(item))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func oldReadStringSlice(reader varbin.Reader) ([]string, error) {
-	//nolint:staticcheck
-	return varbin.ReadValue[[]string](reader, binary.BigEndian)
+	length, err := binary.ReadUvarint(reader)
+	if err != nil {
+		return nil, err
+	}
+	if length == 0 {
+		return nil, nil
+	}
+	result := make([]string, length)
+	for i := range result {
+		strLen, err := binary.ReadUvarint(reader)
+		if err != nil {
+			return nil, err
+		}
+		if strLen == 0 {
+			continue
+		}
+		buf := make([]byte, strLen)
+		_, err = io.ReadFull(reader, buf)
+		if err != nil {
+			return nil, err
+		}
+		result[i] = string(buf)
+	}
+	return result, nil
 }
 
 func oldWriteUint8Slice[E ~uint8](writer varbin.Writer, value []E) error {
-	//nolint:staticcheck
-	return varbin.Write(writer, binary.BigEndian, value)
+	_, err := varbin.WriteUvarint(writer, uint64(len(value)))
+	if err != nil {
+		return err
+	}
+	if len(value) == 0 {
+		return nil
+	}
+	_, err = writer.Write(*(*[]byte)(unsafe.Pointer(&value)))
+	return err
 }
 
 func oldReadUint8Slice[E ~uint8](reader varbin.Reader) ([]E, error) {
-	//nolint:staticcheck
-	return varbin.ReadValue[[]E](reader, binary.BigEndian)
+	length, err := binary.ReadUvarint(reader)
+	if err != nil {
+		return nil, err
+	}
+	if length == 0 {
+		return nil, nil
+	}
+	result := make([]E, length)
+	_, err = io.ReadFull(reader, *(*[]byte)(unsafe.Pointer(&result)))
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func oldWriteUint16Slice(writer varbin.Writer, value []uint16) error {
-	//nolint:staticcheck
-	return varbin.Write(writer, binary.BigEndian, value)
+	_, err := varbin.WriteUvarint(writer, uint64(len(value)))
+	if err != nil {
+		return err
+	}
+	if len(value) == 0 {
+		return nil
+	}
+	return binary.Write(writer, binary.BigEndian, value)
 }
 
 func oldReadUint16Slice(reader varbin.Reader) ([]uint16, error) {
-	//nolint:staticcheck
-	return varbin.ReadValue[[]uint16](reader, binary.BigEndian)
+	length, err := binary.ReadUvarint(reader)
+	if err != nil {
+		return nil, err
+	}
+	if length == 0 {
+		return nil, nil
+	}
+	result := make([]uint16, length)
+	err = binary.Read(reader, binary.BigEndian, result)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func oldWritePrefix(writer varbin.Writer, prefix netip.Prefix) error {
-	//nolint:staticcheck
-	err := varbin.Write(writer, binary.BigEndian, prefix.Addr().AsSlice())
+	addr := prefix.Addr().AsSlice()
+	_, err := varbin.WriteUvarint(writer, uint64(len(addr)))
 	if err != nil {
 		return err
+	}
+	if len(addr) > 0 {
+		_, err = writer.Write(addr)
+		if err != nil {
+			return err
+		}
 	}
 	return binary.Write(writer, binary.BigEndian, uint8(prefix.Bits()))
 }
@@ -89,10 +167,19 @@ func oldReadIPSet(reader varbin.Reader) (*netipx.IPSet, error) {
 		return nil, err
 	}
 	ranges := make([]oldIPRangeData, length)
-	//nolint:staticcheck
-	err = varbin.Read(reader, binary.BigEndian, &ranges)
-	if err != nil {
-		return nil, err
+	for i := range ranges {
+		from, err := readByteSlice(reader)
+		if err != nil {
+			return nil, err
+		}
+		to, err := readByteSlice(reader)
+		if err != nil {
+			return nil, err
+		}
+		ranges[i] = oldIPRangeData{
+			From: from,
+			To:   to,
+		}
 	}
 	mySet := &myIPSet{
 		rr: make([]myIPRange, len(ranges)),
@@ -102,6 +189,22 @@ func oldReadIPSet(reader varbin.Reader) (*netipx.IPSet, error) {
 		mySet.rr[i].to = M.AddrFromIP(rangeData.To)
 	}
 	return (*netipx.IPSet)(unsafe.Pointer(mySet)), nil
+}
+
+func readByteSlice(reader varbin.Reader) ([]byte, error) {
+	length, err := binary.ReadUvarint(reader)
+	if err != nil {
+		return nil, err
+	}
+	if length == 0 {
+		return nil, nil
+	}
+	result := make([]byte, length)
+	_, err = io.ReadFull(reader, result)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // New write functions (without itemType prefix for testing)
@@ -168,14 +271,18 @@ func TestStringSliceCompat(t *testing.T) {
 		{"single_empty", []string{""}},
 		{"single", []string{"test"}},
 		{"multi", []string{"a", "b", "c"}},
+		{"duplicates", []string{"dup", "dup", "dup"}},
 		{"with_empty", []string{"a", "", "c"}},
 		{"utf8", []string{"测试", "テスト", "тест"}},
 		{"long_string", []string{strings.Repeat("x", 128)}},
+		{"long_16383", []string{strings.Repeat("x", 16383)}},
+		{"long_16384", []string{strings.Repeat("x", 16384)}},
 		{"many_elements", generateStrings(128)},
 		{"many_elements_256", generateStrings(256)},
 		{"127_byte_string", []string{strings.Repeat("x", 127)}},
 		{"128_byte_string", []string{strings.Repeat("x", 128)}},
 		{"mixed_lengths", []string{"a", strings.Repeat("b", 100), "", strings.Repeat("c", 200)}},
+		{"mixed_empty_long", []string{"", strings.Repeat("x", 2048), "end"}},
 	}
 
 	for _, tc := range cases {
@@ -223,6 +330,7 @@ func TestUint8SliceCompat(t *testing.T) {
 		{"multi", []uint8{0, 1, 127, 128, 255}},
 		{"boundary", []uint8{0x00, 0x7f, 0x80, 0xff}},
 		{"sequential", generateUint8Slice(256)},
+		{"1024_elements", generateUint8Slice(1024)},
 		{"127_elements", generateUint8Slice(127)},
 		{"128_elements", generateUint8Slice(128)},
 	}
@@ -274,6 +382,7 @@ func TestUint16SliceCompat(t *testing.T) {
 		{"127_elements", generateUint16Slice(127)},
 		{"128_elements", generateUint16Slice(128)},
 		{"256_elements", generateUint16Slice(256)},
+		{"1024_elements", generateUint16Slice(1024)},
 	}
 
 	for _, tc := range cases {
@@ -315,12 +424,15 @@ func TestPrefixCompat(t *testing.T) {
 		input netip.Prefix
 	}{
 		{"ipv4_0", netip.MustParsePrefix("0.0.0.0/0")},
+		{"ipv4_1", netip.MustParsePrefix("128.0.0.0/1")},
 		{"ipv4_8", netip.MustParsePrefix("10.0.0.0/8")},
 		{"ipv4_16", netip.MustParsePrefix("192.168.0.0/16")},
 		{"ipv4_24", netip.MustParsePrefix("192.168.1.0/24")},
+		{"ipv4_31", netip.MustParsePrefix("192.0.2.0/31")},
 		{"ipv4_32", netip.MustParsePrefix("1.2.3.4/32")},
 		{"ipv6_0", netip.MustParsePrefix("::/0")},
 		{"ipv6_64", netip.MustParsePrefix("2001:db8::/64")},
+		{"ipv6_127", netip.MustParsePrefix("2001:db8::/127")},
 		{"ipv6_128", netip.MustParsePrefix("::1/128")},
 		{"ipv6_full", netip.MustParsePrefix("2001:0db8:85a3:0000:0000:8a2e:0370:7334/128")},
 		{"ipv4_private", netip.MustParsePrefix("172.16.0.0/12")},
@@ -371,11 +483,14 @@ func TestIPSetCompat(t *testing.T) {
 		{"single_ipv4", buildIPSet("1.2.3.4")},
 		{"ipv4_range", buildIPSet("192.168.0.0/16")},
 		{"multi_ipv4", buildIPSet("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")},
+		{"overlapping_ipv4", buildIPSet("10.0.0.0/8", "10.0.0.0/9")},
 		{"single_ipv6", buildIPSet("::1")},
 		{"ipv6_range", buildIPSet("2001:db8::/32")},
 		{"mixed", buildIPSet("10.0.0.0/8", "::1", "2001:db8::/32")},
 		{"large", buildLargeIPSet(100)},
+		{"large_ipv6", buildLargeIPv6IPSet(64)},
 		{"adjacent_ranges", buildIPSet("192.168.0.0/24", "192.168.1.0/24", "192.168.2.0/24")},
+		{"duplicate_entries", buildIPSet("192.0.2.0/24", "192.0.2.0/24")},
 	}
 
 	for _, tc := range cases {
@@ -452,6 +567,17 @@ func buildLargeIPSet(count int) *netipx.IPSet {
 	var builder netipx.IPSetBuilder
 	for i := 0; i < count; i++ {
 		prefix := netip.PrefixFrom(netip.AddrFrom4([4]byte{10, byte(i / 256), byte(i % 256), 0}), 24)
+		builder.AddPrefix(prefix)
+	}
+	set, _ := builder.IPSet()
+	return set
+}
+
+func buildLargeIPv6IPSet(count int) *netipx.IPSet {
+	var builder netipx.IPSetBuilder
+	for i := 0; i < count; i++ {
+		addr := netip.AddrFrom16([16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, byte(i >> 8), byte(i), 0, 0})
+		prefix := netip.PrefixFrom(addr, 120)
 		builder.AddPrefix(prefix)
 	}
 	set, _ := builder.IPSet()
